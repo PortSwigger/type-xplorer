@@ -20,8 +20,8 @@ This is a Burp Suite extension designed to test different content types in HTTP 
    1. Download the extension code.
    2. Open Burp Suite and go to the "Extensions" tab.
    3. Click on "Add" in the "installed" section.
-   5. Browse to the location of `TypeXplorer.py` and select it.
-   6. Click "Next" and then "Close" to load the extension.
+   4. Browse to the location of `TypeXplorer.py` and select it.
+   5. Click "Next" and then "Close" to load the extension.
 
 ## Usage
 
@@ -33,7 +33,7 @@ This is a Burp Suite extension designed to test different content types in HTTP 
 **Deleting Entries**:
    - Select an endpoint in the list.
    - Press the delete key to remove it from the list.
-   
+
 ![image 1](assets/1.png)
 ![image 2](assets/2.png)
 
