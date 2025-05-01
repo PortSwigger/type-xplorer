@@ -1,7 +1,8 @@
 # ContentProbe extension for Burp Suite
 
 This is a Burp Suite extension designed to test different content types in HTTP requests. It allow users to test all possibilities of Content-Types (e.g., urlencoded, JSON, XML) and observe the responses in a user-friendly interface.
-
+## Why use it ? 
+- There are many times when we're trying to find CSRF, IDOR, ATO, and other types of vulnerabilities that involve certain restrictions. One common technique is changing the Content-Type header, but doing it manually isn't fun and can be exhausting. With this extension, all the checks happen with a single click
 ## Features
 
 - Send HTTP requests with different content types.
@@ -36,6 +37,11 @@ This is a Burp Suite extension designed to test different content types in HTTP 
 
 ![image 1](assets/1.png)
 ![image 2](assets/2.png)
+
+
+https://github.com/user-attachments/assets/cecc940f-94ec-4b2b-9375-5a99c2433ab4
+
+
 
 ## Contributing
 
