@@ -1,4 +1,4 @@
-# ContentProbe extension for Burp Suite
+# TypeXplorer extension for Burp Suite
 
 This is a Burp Suite extension designed to test different content types in HTTP requests. It allow users to test all possibilities of Content-Types (e.g., urlencoded, JSON, XML) and observe the responses in a user-friendly interface.
 ## Why use it ? 
