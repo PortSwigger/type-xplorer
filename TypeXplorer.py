@@ -167,17 +167,18 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                     k,v = part.split('=',1)
                     d[k]=v
             return d
-
-        try:
-            if 'application/json' in reported_ct: params = parse_json(body)
-            elif 'xml' in reported_ct: params = parse_xml(body)
-            elif 'application/x-www-form-urlencoded' in reported_ct: params = parse_form(body)
-            else:
-                try: params = parse_json(body)
-                except: 
-                    try: params = parse_xml(body)
-                    except: params = parse_form(body)
-        except: params = {}
+        #parse main request body 
+        parsers = [parse_form,parse_json, parse_xml]
+        for parser in parsers:
+            params = {}
+            try:
+                params = parser(body)
+                if len(params) >=1:
+                    break
+                else:
+                    continue   
+            except:
+                continue
 
         # rebuild body
         if body_fmt == 'urlencode':
@@ -193,7 +194,11 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                 new_body = ''.join(parts)
 
         # rebuild & send
-        new_hdrs = [req_line] + others + ['Content-Type: %s' % content_type]
+        content_length = len(new_body.encode('utf-8'))
+        new_hdrs = [req_line] + [h for h in others if not h.lower().startswith("content-length:")]
+        new_hdrs.append('Content-Type: %s' % content_type)
+        new_hdrs.append('Content-Length: %d' % content_length)
+
         new_req_str = '\r\n'.join(new_hdrs) + '\r\n\r\n' + new_body
         new_req = self._helpers.stringToBytes(new_req_str)
         resp = self._callbacks.makeHttpRequest(svc, new_req)
