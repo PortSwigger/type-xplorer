@@ -39,7 +39,11 @@ This is a Burp Suite extension designed to test different content types in HTTP 
 ![image 2](assets/2.png)
 
 
-https://github.com/user-attachments/assets/cecc940f-94ec-4b2b-9375-5a99c2433ab4
+
+
+
+https://github.com/user-attachments/assets/32230033-1e3a-416b-8ec0-99fb41c9e565
+
 
 
 
