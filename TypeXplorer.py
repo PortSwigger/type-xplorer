@@ -3,213 +3,390 @@ from java.lang import Object
 from java.util import ArrayList, HashMap
 from javax.swing import (
     JPanel, JSplitPane, JScrollPane,
-    DefaultListModel, JList, JMenuItem, SwingUtilities, JCheckBox
+    DefaultListModel, JList, JMenuItem, SwingUtilities, JCheckBox, JButton, JLabel, BoxLayout, Box
 )
 from javax.swing.event import ListSelectionListener
-from java.awt import BorderLayout, Dimension, FlowLayout
+from java.awt import BorderLayout, Dimension, GridLayout, FlowLayout, Insets,GridBagLayout, GridBagConstraints
 from java.awt.event import KeyAdapter, KeyEvent
 from threading import Thread
 import json
 import re
+import uuid
 
 class EndpointSelectionListener(Object, ListSelectionListener):
-    def __init__(self, parent): self.parent = parent
-    def valueChanged(self, ev):
-        if ev.getValueIsAdjusting(): return
+    def __init__(self, parent):
+        self.parent = parent
+    def valueChanged(self, event):
+        if event.getValueIsAdjusting():
+            return
         self.parent._on_endpoint_selected()
 
 class CaseSelectionListener(Object, ListSelectionListener):
-    def __init__(self, parent): self.parent = parent
-    def valueChanged(self, ev):
-        if ev.getValueIsAdjusting(): return
+    def __init__(self, parent):
+        self.parent = parent
+    def valueChanged(self, event):
+        if event.getValueIsAdjusting():
+            return
         self.parent._on_case_selected()
 
 class DeleteKeyListener(KeyAdapter):
-    def __init__(self, parent): self.parent = parent
-    def keyPressed(self, ev):
-        if ev.getKeyCode() == KeyEvent.VK_DELETE:
-            label = self.parent.endpoint_list.getSelectedValue()
-            idx = self.parent.endpoint_list.getSelectedIndex()
+    def __init__(self, parent):
+        self.parent = parent
+    def keyPressed(self, event):
+        if event.getKeyCode() == KeyEvent.VK_DELETE:
+            label = self.parent.endpoint_list_view.getSelectedValue()
+            idx = self.parent.endpoint_list_view.getSelectedIndex()
             if label and idx >= 0:
-                self.parent.url_map.remove(label)
-                self.parent.endpoint_model.remove(idx)
-                self.parent.case_model.clear()
+                self.parent.endpoint_message_map.remove(label)
+                self.parent.endpoint_list_model.remove(idx)
+                self.parent.test_case_list_model.clear()
                 SwingUtilities.invokeLater(self.parent._clear_editors)
 
 class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorController):
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
-        # maps label to message
-        self.url_map = HashMap()
-        # count occurrences per base URL
-        self.url_count = HashMap()
+        self.endpoint_message_map = HashMap()
+        self.selected_test_cases = set()
         self._init_ui()
         callbacks.addSuiteTab(self)
         callbacks.setExtensionName("TypeXplorer")
         callbacks.registerContextMenuFactory(self)
-        self.counter= 0
+        self.endpoint_counter = 0
 
     def createMenuItems(self, invocation):
         menu = ArrayList()
         menu.add(JMenuItem("Send to TypeXplorer",
-            actionPerformed=lambda ev: self._send_to_tab(invocation)))
+            actionPerformed=lambda event: self._send_to_tab(invocation)))
         return menu
 
     def _send_to_tab(self, invocation):
         messages = invocation.getSelectedMessages()
-        if not messages: return
+        if not messages:
+            return
         message = messages[0]
-        svc = message.getHttpService()
-        info = self._helpers.analyzeRequest(svc, message.getRequest())
+        http_service = message.getHttpService()
+        info = self._helpers.analyzeRequest(http_service, message.getRequest())
         base_url = info.getUrl().toString()
-        # increment count for this URL
-        self.counter += 1
-        label = "%d) %s" % (self.counter, base_url)
-        self.url_map.put(label, message)
-        self.endpoint_model.addElement(label)
+        self.endpoint_counter += 1
+        label = "%d) %s" % (self.endpoint_counter, base_url)
+        self.endpoint_message_map.put(label, message)
+        self.endpoint_list_model.addElement(label)
+        for content_type, body_format in self.selected_test_cases:
+            Thread(target=lambda h=content_type, b=body_format: self._run_case(message, h, b)).start()
 
-    # ITab methods
-    def getTabCaption(self): return "TypeXplorer"
-    def getUiComponent(self): return self.main_panel
+    def getTabCaption(self):
+        return "TypeXplorer"
+    def getUiComponent(self):
+        return self.typexplorer_panel
 
-    # IMessageEditorController
-    def getHttpService(self): return getattr(self, 'lastService', None)
-    def getRequest(self): return getattr(self, 'lastRequest', None)
-    def getResponse(self): return getattr(self, 'lastResponse', None)
+    def getHttpService(self):
+        return getattr(self, 'last_service', None)
+    def getRequest(self):
+        return getattr(self, 'last_request', None)
+    def getResponse(self):
+        return getattr(self, 'last_response', None)
 
     def _init_ui(self):
-        self.main_panel = JPanel(BorderLayout())
-        self.use_root_checkbox = JCheckBox("Use <root> wrapper")
-        ctrl = JPanel(FlowLayout(FlowLayout.LEFT)); ctrl.add(self.use_root_checkbox)
-        self.main_panel.add(ctrl, BorderLayout.NORTH)
+        self.typexplorer_panel = JPanel(BorderLayout())
 
-        self.endpoint_model = DefaultListModel()
-        self.endpoint_list = JList(self.endpoint_model)
-        self.endpoint_list.setSelectionMode(0)
-        self.endpoint_list.addKeyListener(DeleteKeyListener(self))
-        left = JScrollPane(self.endpoint_list); left.setPreferredSize(Dimension(300,0))
-
-        self.case_model = DefaultListModel()
-        self.case_list = JList(self.case_model); self.case_list.setSelectionMode(0)
-        right_list = JScrollPane(self.case_list); right_list.setPreferredSize(Dimension(300,0))
-
-        self.requestViewer = self._callbacks.createMessageEditor(self, False)
-        self.responseViewer = self._callbacks.createMessageEditor(self, False)
-        self.editors_panel = JSplitPane(JSplitPane.VERTICAL_SPLIT,
-            self.requestViewer.getComponent(), self.responseViewer.getComponent())
-        self.editors_panel.setResizeWeight(0.5)
-
-        split_lists = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, left, right_list)
-        split_lists.setResizeWeight(0.3)
-        split_main = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, split_lists, self.editors_panel)
-        split_main.setResizeWeight(0.3)
-        self.main_panel.add(split_main, BorderLayout.CENTER)
-        self.main_panel.setPreferredSize(Dimension(1000,600))
-
-        self.cases = [
-            ("1) header: UrlEncode  body: UrlEncode", "application/x-www-form-urlencoded", "urlencode"),
-            ("2) header: UrlEncode  body: JSON", "application/x-www-form-urlencoded", "json"),
-            ("3) header: UrlEncode  body: XML", "application/x-www-form-urlencoded", "xml"),
-            ("4) header: JSON  body: UrlEncode", "application/json", "urlencode"),
-            ("5) header: JSON  body: JSON", "application/json", "json"),
-            ("6) header: JSON  body: XML", "application/json", "xml"),
-            ("7) header: XML  body: UrlEncode", "application/xml", "urlencode"),
-            ("8) header: XML  body: JSON", "application/xml", "json"),
-            ("9) header: XML  body: XML", "application/xml", "xml"),
+        self.test_case_configs = [
+            ("header: UrlEncode  body: UrlEncode", "application/x-www-form-urlencoded", "urlencode"),
+            ("header: UrlEncode  body: JSON", "application/x-www-form-urlencoded", "json"),
+            ("header: UrlEncode  body: XML", "application/x-www-form-urlencoded", "xml"),
+            ("header: UrlEncode  body: form-data", "application/x-www-form-urlencoded", "multipart"),
+            ("header: JSON  body: UrlEncode", "application/json", "urlencode"),
+            ("header: JSON  body: JSON", "application/json", "json"),
+            ("header: JSON  body: XML", "application/json", "xml"),
+            ("header: JSON  body: form-data", "application/json", "multipart"),
+            ("header: XML  body: UrlEncode", "application/xml", "urlencode"),
+            ("header: XML  body: JSON", "application/xml", "json"),
+            ("header: XML  body: XML", "application/xml", "xml"),
+            ("header: XML  body: form-data", "application/xml", "multipart"),
+            ("header: form-data  body: form-data", "multipart/form-data", "multipart"),
+            ("header: form-data  body: UrlEncode", "multipart/form-data", "urlencode"),
+            ("header: form-data  body: JSON", "multipart/form-data", "json"),
+            ("header: form-data  body: XML", "multipart/form-data", "xml"),
+            ("header: Text/Plain  body: UrlEncode", "text/plain", "urlencode"),
+            ("header: Text/Plain  body: JSON", "text/plain", "json"),
+            ("header: Text/Plain  body: XML", "text/plain", "xml"),
+            ("header: Text/Plain  body: form-data", "text/plain", "multipart"),
         ]
-        self.endpoint_list.getSelectionModel().addListSelectionListener(EndpointSelectionListener(self))
-        self.case_list.getSelectionModel().addListSelectionListener(CaseSelectionListener(self))
+
+        self.test_case_to_description = {(h, b): desc for desc, h, b in self.test_case_configs}
+        self.description_to_test_case = {desc: (h, b) for desc, h, b in self.test_case_configs}
+
+        content_type_headers = [
+            "application/x-www-form-urlencoded",
+            "application/json",
+            "application/xml",
+            "multipart/form-data",
+            "text/plain"
+        ]
+        body_formats = ["urlencode", "json", "xml", "multipart"]
+        content_type_labels = ["UrlEncode", "JSON", "XML", "form-data", "Text/Plain"]
+        body_format_labels = ["UrlEncode", "JSON", "XML", "form-data"]
+        test_case_description_map = {(h, b): desc for desc, h, b in self.test_case_configs}
+
+        table_panel = JPanel(GridBagLayout())
+        table_panel.setPreferredSize(Dimension(180, 120))  
+        gbc = GridBagConstraints()
+        gbc.insets = Insets(1, 5, 1, 5)
+
+        self.test_case_checkboxes = {}
+
+        
+        gbc.gridx = 1
+        gbc.gridy = 0
+        gbc.gridwidth = 4  
+        gbc.fill = GridBagConstraints.HORIZONTAL
+        body_formats_label = JLabel("Body Formats")
+        body_formats_label.setHorizontalAlignment(JLabel.CENTER)
+        table_panel.add(body_formats_label, gbc)
+
+        
+        gbc.gridwidth = 1
+        gbc.fill = GridBagConstraints.NONE
+
+        
+        gbc.gridx = 0
+        gbc.gridy = 1
+        table_panel.add(JPanel(), gbc)
+
+        
+        for j, body_label in enumerate(body_format_labels):
+            gbc.gridx = j + 1
+            table_panel.add(JLabel(body_label), gbc)
+
+        
+        for i, header in enumerate(content_type_headers):
+            gbc.gridx = 0
+            gbc.gridy = i + 2  
+            table_panel.add(JLabel(content_type_labels[i]), gbc)
+            for j, body in enumerate(body_formats):
+                gbc.gridx = j + 1
+                if (header, body) in test_case_description_map:
+                    checkbox = JCheckBox()
+                    checkbox.setToolTipText(test_case_description_map[(header, body)])
+                    checkbox.setMargin(Insets(0, 0, 0, 0))
+                    checkbox.setPreferredSize(Dimension(20, 20))
+                    self.test_case_checkboxes[(header, body)] = checkbox
+                    checkbox.addActionListener(lambda event, h=header, b=body: self._on_test_case_changed(h, b))
+                    table_panel.add(checkbox, gbc)
+                else:
+                    table_panel.add(JPanel(), gbc)
+
+        self.endpoint_list_model = DefaultListModel()
+        self.endpoint_list_view = JList(self.endpoint_list_model)
+        self.endpoint_list_view.setSelectionMode(0)
+        self.endpoint_list_view.addKeyListener(DeleteKeyListener(self))
+        endpoint_scroll_pane = JScrollPane(self.endpoint_list_view)
+        endpoint_scroll_pane.setPreferredSize(Dimension(300, 0))
+
+        self.test_case_list_model = DefaultListModel()
+        self.test_case_list_view = JList(self.test_case_list_model)
+        test_case_scroll_pane = JScrollPane(self.test_case_list_view)
+        test_case_scroll_pane.setPreferredSize(Dimension(350, 300))
+
+        test_case_control_panel = JPanel()
+        test_case_control_panel.setLayout(BoxLayout(test_case_control_panel, BoxLayout.Y_AXIS))
+
+        control_button_panel = JPanel(FlowLayout(FlowLayout.LEFT))
+        control_button_panel.setLayout(BoxLayout(control_button_panel, BoxLayout.X_AXIS))
+        control_button_panel.setPreferredSize(Dimension(350, 50))
+        self.xml_root_wrapper_checkbox = JCheckBox("Use <root> wrapper")
+        self.xml_root_wrapper_checkbox.setSelected(False)
+        select_all_test_cases_button = JButton("Select All")
+        select_all_test_cases_button.addActionListener(lambda event: self._select_all_test_cases())
+        deselect_all_test_cases_button = JButton("Deselect All")
+        deselect_all_test_cases_button.addActionListener(lambda event: self._deselect_all_test_cases())
+        control_button_panel.add(select_all_test_cases_button)
+        control_button_panel.add(Box.createHorizontalStrut(3))
+        control_button_panel.add(deselect_all_test_cases_button)
+        control_button_panel.add(Box.createHorizontalStrut(3))
+        control_button_panel.add(self.xml_root_wrapper_checkbox)
+        table_scroll_pane = JScrollPane(table_panel)
+        table_scroll_pane.setPreferredSize(Dimension(180, 120))  
+        split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT, control_button_panel, table_scroll_pane)
+        split_pane.setResizeWeight(0)
+        split_pane.setDividerLocation(400)
+        test_case_control_panel.add(split_pane, BorderLayout.CENTER)
+
+        endpoint_and_config_panel = JPanel(BorderLayout())
+        split_test_case_endpoint = JSplitPane(JSplitPane.VERTICAL_SPLIT, endpoint_scroll_pane, test_case_scroll_pane)
+        split_test_case_endpoint.setResizeWeight(0.5)
+        split_test_case_endpoint.setDividerLocation(400)
+        endpoint_and_config_panel.add(split_test_case_endpoint, BorderLayout.CENTER)
+
+        self.request_editor = self._callbacks.createMessageEditor(self, False)
+        self.response_editor = self._callbacks.createMessageEditor(self, False)
+        self.request_response_split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT,
+            self.request_editor.getComponent(), self.response_editor.getComponent())
+        self.request_response_split_pane.setResizeWeight(0.5)
+
+        endpoint_and_test_case_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+            test_case_control_panel, endpoint_and_config_panel)
+        endpoint_and_test_case_split.setResizeWeight(0.5)
+        endpoint_and_test_case_split.setDividerLocation(350)
+
+        main_split_pane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
+            endpoint_and_test_case_split, self.request_response_split_pane)
+        main_split_pane.setResizeWeight(0.3)
+        self.typexplorer_panel.add(main_split_pane, BorderLayout.CENTER)
+        self.typexplorer_panel.setPreferredSize(Dimension(1000, 600))
+
+        self.endpoint_list_view.getSelectionModel().addListSelectionListener(EndpointSelectionListener(self))
+        self.test_case_list_view.getSelectionModel().addListSelectionListener(CaseSelectionListener(self))
+
+    def _on_test_case_changed(self, content_type, body_format):
+        checkbox = self.test_case_checkboxes.get((content_type, body_format))
+        if checkbox.isSelected():
+            self.selected_test_cases.add((content_type, body_format))
+        else:
+            self.selected_test_cases.discard((content_type, body_format))
+
+    def _select_all_test_cases(self):
+        for (content_type, body_format), checkbox in self.test_case_checkboxes.items():
+            checkbox.setSelected(True)
+            self.selected_test_cases.add((content_type, body_format))
+
+    def _deselect_all_test_cases(self):
+        for checkbox in self.test_case_checkboxes.values():
+            checkbox.setSelected(False)
+        self.selected_test_cases.clear()
 
     def _on_endpoint_selected(self):
-        self.case_model.clear()
-        for desc, _, _ in self.cases: self.case_model.addElement(desc)
+        self.test_case_list_model.clear()
+        label = self.endpoint_list_view.getSelectedValue()
+        if label:
+            for content_type, body_format in self.selected_test_cases:
+                desc = self.test_case_to_description.get((content_type, body_format))
+                if desc:
+                    self.test_case_list_model.addElement(desc)
+            for (content_type, body_format), checkbox in self.test_case_checkboxes.items():
+                checkbox.setSelected((content_type, body_format) in self.selected_test_cases)
         SwingUtilities.invokeLater(self._clear_editors)
 
     def _on_case_selected(self):
-        idx = self.case_list.getSelectedIndex()
-        if idx < 0: return
-        label = self.endpoint_list.getSelectedValue()
-        message = self.url_map.get(label)
-        desc, content_type, body_fmt = self.cases[idx]
-        Thread(target=lambda: self._run_case(message, content_type, body_fmt)).start()
+        selected_desc = self.test_case_list_view.getSelectedValue()
+        if selected_desc:
+            content_type, body_format = self.description_to_test_case.get(selected_desc)
+            if content_type and body_format:
+                label = self.endpoint_list_view.getSelectedValue()
+                message = self.endpoint_message_map.get(label)
+                if message:
+                    Thread(target=lambda: self._run_case(message, content_type, body_format)).start()
 
     def _clear_editors(self):
-        self.requestViewer.setMessage(None, True)
-        self.responseViewer.setMessage(None, False)
+        empty = self._helpers.stringToBytes("")
+        self.request_editor.setMessage(empty, True)
+        self.response_editor.setMessage(empty, False)
 
-    def _update_editors(self, req, resp):
-        self.requestViewer.setMessage(req, True)
-        self.responseViewer.setMessage(resp, False)
+    def _update_editors(self, request_bytes, response_bytes):
+        self.request_editor.setMessage(request_bytes, True)
+        self.response_editor.setMessage(response_bytes, False)
 
-    def _run_case(self, message, content_type, body_fmt):
-        svc, request = message.getHttpService(), message.getRequest()
-        req_str = self._helpers.bytesToString(request)
-        analyzed = self._helpers.analyzeRequest(request)
+    def _run_case(self, message, content_type, body_format):
+        http_service, request_bytes = message.getHttpService(), message.getRequest()
+        request_string = self._helpers.bytesToString(request_bytes)
+        analyzed = self._helpers.analyzeRequest(request_bytes)
         offset = analyzed.getBodyOffset()
-        hdr = req_str[:offset].rstrip('\r\n')
-        body = req_str[offset:]
-        lines = hdr.split('\r\n')
+        header_lines = request_string[:offset].rstrip('\r\n')
+        body = request_string[offset:]
+        lines = header_lines.split('\r\n')
         req_line = lines[0]
         others = [h for h in lines[1:] if not h.lower().startswith("content-type:")]
 
-        ct_header = next((h for h in lines if h.lower().startswith("content-type:")), None)
-        reported_ct = ct_header.split(":",1)[1].strip().lower() if ct_header else ""
+        content_type_header = next((h for h in lines if h.lower().startswith("content-type:")), None)
+        original_content_type = content_type_header.split(":", 1)[1].strip().lower() if content_type_header else ""
 
-        def parse_json(b): return {str(k):str(v) for k,v in json.loads(b).items()}
-        def parse_xml(b):
-            p = re.compile(r'<(?P<key>[^>\s/]+)>(?P<value>[^<]*)</(?P=key)>')
-            return {m.group('key'): m.group('value').strip() for m in p.finditer(b)}
-        def parse_form(b):
-            d = {}
-            for part in b.split('&'):
-                if '=' in part:
-                    k,v = part.split('=',1)
-                    d[k]=v
-            return d
-        #parse main request body 
-        parsers = [parse_form,parse_json, parse_xml]
-        for parser in parsers:
-            params = {}
+        def parse_json(b):
             try:
-                params = parser(body)
-                if len(params) >=1:
-                    break
-                else:
-                    continue   
+                return {str(k): str(v) for k, v in json.loads(b).items()}
             except:
-                continue
+                return {}
 
-        # rebuild body
-        if body_fmt == 'urlencode':
-            parts = ['%s=%s' % (k,v) for k,v in params.items()]
+        def parse_xml(b):
+            try:
+                b = re.sub(r'<\?xml[^>]*\?>', '', b).strip()
+                p = re.compile(r'<(?P<key>[^>\s/]+)>(?P<value>[^<]*)</(?P=key)>\s*(?=(?:<[^/]|$))', re.DOTALL)
+                return {m.group('key'): m.group('value').strip() for m in p.finditer(b)}
+            except:
+                return {}
+
+        def parse_form(b):
+            try:
+                d = {}
+                for part in b.split('&'):
+                    if '=' in part:
+                        k, v = part.split('=', 1)
+                        d[k] = v
+                return d
+            except:
+                return {}
+
+        def parse_multipart(b, content_type):
+            try:
+                if not content_type.startswith("multipart/form-data"):
+                    return {}
+                boundary = "--" + content_type.split("boundary=")[1].strip()
+                parts = b.split(boundary)
+                d = {}
+                for part in parts:
+                    if "Content-Disposition" in part:
+                        name_match = re.search(r'name="([^"]+)"', part)
+                        if name_match:
+                            name = name_match.group(1)
+                            value_match = re.search(r'\r\n\r\n(.+?)\r\n', part, re.DOTALL)
+                            if value_match:
+                                d[name] = value_match.group(1).strip()
+                return d
+            except:
+                return {}
+
+        parsers = [
+            (parse_form, "application/x-www-form-urlencoded"),
+            (parse_json, "application/json"),
+            (parse_xml, "application/xml"),
+            (parse_multipart, "multipart/form-data")
+        ]
+        params = {}
+        for parser, expected_ct in parsers:
+            if original_content_type.startswith(expected_ct) or not params:
+                params = parser(body)
+                if len(params) >= 1:
+                    break
+
+        if body_format == 'urlencode':
+            parts = ['%s=%s' % (k, v) for k, v in params.items()]
             new_body = '&'.join(parts)
-        elif body_fmt == 'json':
+        elif body_format == 'json':
             new_body = json.dumps(params)
-        else:
-            parts = ['<%s>%s</%s>' % (k,v,k) for k,v in params.items()]
-            if self.use_root_checkbox.isSelected():
-                new_body = '<root>' + ''.join(parts) + '</root>'
+        elif body_format == 'xml':
+            parts = ['<%s>%s</%s>' % (k, v, k) for k, v in params.items()]
+            xml_body = ''.join(parts)
+            if self.xml_root_wrapper_checkbox.isSelected():
+                new_body = '<root>' + xml_body + '</root>'
             else:
-                new_body = ''.join(parts)
+                new_body = xml_body
+        elif body_format == 'multipart':
+            boundary = "----WebKitFormBoundary" + str(uuid.uuid4()).replace("-", "")
+            parts = []
+            for k, v in params.items():
+                part = "--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n" % (boundary, k, v)
+                parts.append(part)
+            parts.append("--%s--\r\n" % boundary)
+            new_body = ''.join(parts)
+            if content_type == 'multipart/form-data':
+                content_type = 'multipart/form-data; boundary=%s' % boundary
 
-        # rebuild & send
         content_length = len(new_body.encode('utf-8'))
-        new_hdrs = [req_line] + [h for h in others if not h.lower().startswith("content-length:")]
-        new_hdrs.append('Content-Type: %s' % content_type)
-        new_hdrs.append('Content-Length: %d' % content_length)
+        new_headers = [req_line] + [h for h in others if not h.lower().startswith("content-length:")]
+        new_headers.append('Content-Type: %s' % content_type)
+        new_headers.append('Content-Length: %d' % content_length)
 
-        new_req_str = '\r\n'.join(new_hdrs) + '\r\n\r\n' + new_body
-        new_req = self._helpers.stringToBytes(new_req_str)
-        resp = self._callbacks.makeHttpRequest(svc, new_req)
-        self.lastService, self.lastRequest, self.lastResponse = svc, new_req, resp.getResponse()
-        SwingUtilities.invokeLater(lambda: self._update_editors(new_req, self.lastResponse))
-    def _clear_editors(self):
-        # Clear editors by setting empty content (Burp disallows null)
-        empty = self._helpers.stringToBytes("")
-        self.requestViewer.setMessage(empty, True)
-        self.responseViewer.setMessage(empty, False)
-
-    def _update_editors(self, req_bytes, resp_bytes):
-        self.requestViewer.setMessage(req_bytes, True)
-        self.responseViewer.setMessage(resp_bytes, False)        
+        new_request_string = '\r\n'.join(new_headers) + '\r\n\r\n' + new_body
+        new_request_bytes = self._helpers.stringToBytes(new_request_string)
+        response_bytes = self._callbacks.makeHttpRequest(http_service, new_request_bytes)
+        self.last_service, self.last_request, self.last_response = http_service, new_request_bytes, response_bytes.getResponse()
+        SwingUtilities.invokeLater(lambda: self._update_editors(new_request_bytes, self.last_response))
