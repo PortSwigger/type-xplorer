@@ -43,6 +43,7 @@ class DeleteKeyListener(KeyAdapter):
                 SwingUtilities.invokeLater(self.parent._clear_editors)
 
 class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorController):
+    
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
@@ -55,10 +56,44 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.endpoint_counter = 0
 
     def createMenuItems(self, invocation):
+        # Only show the context menu item if exactly one message is selected
+        selected_messages = invocation.getSelectedMessages()
+        if len(selected_messages) != 1:
+            return []  # Return empty list to hide menu items
+        
+        # Check if request has Content-Length header
+        message = selected_messages[0]
+        if not self._has_content_length_header(message):
+            return []  # Don't show menu if Content-Length is missing
+        
         menu = ArrayList()
         menu.add(JMenuItem("Send to TypeXplorer",
             actionPerformed=lambda event: self._send_to_tab(invocation)))
         return menu
+
+    def _has_content_length_header(self, message):
+        """
+        Check if the request has Content-Length header.
+        """
+        try:
+            request_bytes = message.getRequest()
+            if not request_bytes:
+                return False
+                
+            request_string = self._helpers.bytesToString(request_bytes)
+            analyzed = self._helpers.analyzeRequest(request_bytes)
+            offset = analyzed.getBodyOffset()
+            header_lines = request_string[:offset]
+            
+            # Check if Content-Length header exists
+            lines = header_lines.split('\r\n')
+            has_content_length = any(h.lower().startswith("content-length:") for h in lines)
+            
+            return has_content_length
+            
+        except Exception as e:
+            print("TypeXplorer: Error checking Content-Length header - %s" % str(e))
+            return False
 
     def _send_to_tab(self, invocation):
         messages = invocation.getSelectedMessages()
