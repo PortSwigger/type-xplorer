@@ -38,6 +38,9 @@ class DeleteKeyListener(KeyAdapter):
             idx = self.parent.endpoint_list_view.getSelectedIndex()
             if label and idx >= 0:
                 self.parent.endpoint_message_map.remove(label)
+                # Clear cached results for this endpoint
+                if label in self.parent.test_results_cache:
+                    del self.parent.test_results_cache[label]
                 self.parent.endpoint_list_model.remove(idx)
                 self.parent.test_case_list_model.clear()
                 SwingUtilities.invokeLater(self.parent._clear_editors)
@@ -49,6 +52,8 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self._helpers = callbacks.getHelpers()
         self.endpoint_message_map = HashMap()
         self.selected_test_cases = set()
+        # Cache to store test results: {endpoint_label: {(content_type, body_format): (request_bytes, response_bytes)}}
+        self.test_results_cache = {}
         self._init_ui()
         callbacks.addSuiteTab(self)
         callbacks.setExtensionName("TypeXplorer")
@@ -107,8 +112,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         label = "%d) %s" % (self.endpoint_counter, base_url)
         self.endpoint_message_map.put(label, message)
         self.endpoint_list_model.addElement(label)
-        for content_type, body_format in self.selected_test_cases:
-            Thread(target=lambda h=content_type, b=body_format: self._run_case(message, h, b)).start()
+        # Initialize empty cache for this endpoint
+        self.test_results_cache[label] = {}
+        # Don't automatically run test cases anymore
 
     def getTabCaption(self):
         return "TypeXplorer"
@@ -235,11 +241,20 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         select_all_test_cases_button.addActionListener(lambda event: self._select_all_test_cases())
         deselect_all_test_cases_button = JButton("Deselect All")
         deselect_all_test_cases_button.addActionListener(lambda event: self._deselect_all_test_cases())
+        
+        # Add Test button
+        self.test_button = JButton("Test Selected")
+        self.test_button.addActionListener(lambda event: self._run_selected_tests())
+        self.test_button.setEnabled(False)  # Initially disabled
+        
         control_button_panel.add(select_all_test_cases_button)
         control_button_panel.add(Box.createHorizontalStrut(3))
         control_button_panel.add(deselect_all_test_cases_button)
         control_button_panel.add(Box.createHorizontalStrut(3))
+        control_button_panel.add(self.test_button)
+        control_button_panel.add(Box.createHorizontalStrut(3))
         control_button_panel.add(self.xml_root_wrapper_checkbox)
+        
         table_scroll_pane = JScrollPane(table_panel)
         table_scroll_pane.setPreferredSize(Dimension(180, 120))  
         split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT, control_button_panel, table_scroll_pane)
@@ -253,7 +268,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         split_test_case_endpoint.setDividerLocation(400)
         endpoint_and_config_panel.add(split_test_case_endpoint, BorderLayout.CENTER)
 
-        self.request_editor = self._callbacks.createMessageEditor(self, False)
+        self.request_editor = self._callbacks.createMessageEditor(self, True)
         self.response_editor = self._callbacks.createMessageEditor(self, False)
         self.request_response_split_pane = JSplitPane(JSplitPane.VERTICAL_SPLIT,
             self.request_editor.getComponent(), self.response_editor.getComponent())
@@ -262,7 +277,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         endpoint_and_test_case_split = JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
             test_case_control_panel, endpoint_and_config_panel)
         endpoint_and_test_case_split.setResizeWeight(0.5)
-        endpoint_and_test_case_split.setDividerLocation(350)
+        endpoint_and_test_case_split.setDividerLocation(450)
 
         main_split_pane = JSplitPane(JSplitPane.HORIZONTAL_SPLIT,
             endpoint_and_test_case_split, self.request_response_split_pane)
@@ -279,38 +294,111 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             self.selected_test_cases.add((content_type, body_format))
         else:
             self.selected_test_cases.discard((content_type, body_format))
+        
+        # Update test button state and test case list
+        self._update_test_button_state()
+        self._update_test_case_list()
 
     def _select_all_test_cases(self):
         for (content_type, body_format), checkbox in self.test_case_checkboxes.items():
             checkbox.setSelected(True)
             self.selected_test_cases.add((content_type, body_format))
+        self._update_test_button_state()
+        self._update_test_case_list()
 
     def _deselect_all_test_cases(self):
         for checkbox in self.test_case_checkboxes.values():
             checkbox.setSelected(False)
         self.selected_test_cases.clear()
+        self._update_test_button_state()
+        self._update_test_case_list()
+        SwingUtilities.invokeLater(self._clear_editors)
 
-    def _on_endpoint_selected(self):
-        self.test_case_list_model.clear()
+    def _update_test_button_state(self):
+        """Enable/disable test button based on selected endpoint and test cases"""
+        has_endpoint = self.endpoint_list_view.getSelectedValue() is not None
+        has_test_cases = len(self.selected_test_cases) > 0
+        self.test_button.setEnabled(has_endpoint and has_test_cases)
+
+    def _update_test_case_list(self):
+        """Update the test case list to show selected test cases"""
         label = self.endpoint_list_view.getSelectedValue()
         if label:
+            self.test_case_list_model.clear()
             for content_type, body_format in self.selected_test_cases:
                 desc = self.test_case_to_description.get((content_type, body_format))
                 if desc:
+                    # Add visual indicator if test has been run
+                    if label in self.test_results_cache and (content_type, body_format) in self.test_results_cache[label]:
+                        desc = "[DONE] " + desc
                     self.test_case_list_model.addElement(desc)
-            for (content_type, body_format), checkbox in self.test_case_checkboxes.items():
-                checkbox.setSelected((content_type, body_format) in self.selected_test_cases)
+
+    def _run_selected_tests(self):
+        """Run all selected test cases for the current endpoint"""
+        label = self.endpoint_list_view.getSelectedValue()
+        if not label:
+            return
+            
+        message = self.endpoint_message_map.get(label)
+        if not message:
+            return
+        
+        # Disable test button during execution
+        self.test_button.setEnabled(False)
+        self.test_button.setText("Testing...")
+        
+        def run_tests_thread():
+            try:
+                for content_type, body_format in self.selected_test_cases:
+                    # Only run test if not already cached
+                    if label not in self.test_results_cache:
+                        self.test_results_cache[label] = {}
+                    
+                    if (content_type, body_format) not in self.test_results_cache[label]:
+                        request_bytes, response_bytes = self._execute_test_case(message, content_type, body_format)
+                        self.test_results_cache[label][(content_type, body_format)] = (request_bytes, response_bytes)
+                
+                # Update UI on completion
+                SwingUtilities.invokeLater(lambda: [
+                    setattr(self.test_button, 'text', 'Test Selected'),
+                    self._update_test_button_state(),
+                    self._update_test_case_list()
+                ])
+                
+            except Exception as e:
+                print("TypeXplorer: Error running tests - %s" % str(e))
+                SwingUtilities.invokeLater(lambda: [
+                    setattr(self.test_button, 'text', 'Test Selected'),
+                    self._update_test_button_state()
+                ])
+        
+        Thread(target=run_tests_thread).start()
+
+    def _on_endpoint_selected(self):
+        self._update_test_case_list()
+        # Update checkboxes to reflect current selection
+        for (content_type, body_format), checkbox in self.test_case_checkboxes.items():
+            checkbox.setSelected((content_type, body_format) in self.selected_test_cases)
+        self._update_test_button_state()
         SwingUtilities.invokeLater(self._clear_editors)
 
     def _on_case_selected(self):
         selected_desc = self.test_case_list_view.getSelectedValue()
         if selected_desc:
-            content_type, body_format = self.description_to_test_case.get(selected_desc)
+            # Remove the [DONE] prefix if present
+            desc_clean = selected_desc.replace("[DONE] ", "")
+            content_type, body_format = self.description_to_test_case.get(desc_clean)
             if content_type and body_format:
                 label = self.endpoint_list_view.getSelectedValue()
-                message = self.endpoint_message_map.get(label)
-                if message:
-                    Thread(target=lambda: self._run_case(message, content_type, body_format)).start()
+                if label and label in self.test_results_cache:
+                    # Load from cache if available
+                    cached_result = self.test_results_cache[label].get((content_type, body_format))
+                    if cached_result:
+                        request_bytes, response_bytes = cached_result
+                        self.last_service = self.endpoint_message_map.get(label).getHttpService()
+                        self.last_request = request_bytes
+                        self.last_response = response_bytes
+                        SwingUtilities.invokeLater(lambda: self._update_editors(request_bytes, response_bytes))
 
     def _clear_editors(self):
         empty = self._helpers.stringToBytes("")
@@ -321,7 +409,8 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.request_editor.setMessage(request_bytes, True)
         self.response_editor.setMessage(response_bytes, False)
 
-    def _run_case(self, message, content_type, body_format):
+    def _execute_test_case(self, message, content_type, body_format):
+        """Execute a single test case and return request/response bytes"""
         http_service, request_bytes = message.getHttpService(), message.getRequest()
         request_string = self._helpers.bytesToString(request_bytes)
         analyzed = self._helpers.analyzeRequest(request_bytes)
@@ -423,5 +512,5 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         new_request_string = '\r\n'.join(new_headers) + '\r\n\r\n' + new_body
         new_request_bytes = self._helpers.stringToBytes(new_request_string)
         response_bytes = self._callbacks.makeHttpRequest(http_service, new_request_bytes)
-        self.last_service, self.last_request, self.last_response = http_service, new_request_bytes, response_bytes.getResponse()
-        SwingUtilities.invokeLater(lambda: self._update_editors(new_request_bytes, self.last_response))
+        
+        return new_request_bytes, response_bytes.getResponse()
