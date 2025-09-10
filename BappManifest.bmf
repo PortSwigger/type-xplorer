@@ -1,0 +1,13 @@
+Uuid: b12907f6b1a848c98accc35a5bdfda76
+ExtensionType: 2
+Name: Type Xplorer
+RepoName: type-xplorer
+ScreenVersion: 1.0.0
+SerialVersion: 1
+MinPlatformVersion: 2
+ProOnly: False
+Author: Over-Flowy
+ShortDescription: This extension allows users to test different HTTP Content-Types (e.g., urlencoded, JSON, XML) in requests and view responses in an easy-to-use interface.
+EntryPoint: TypeXplorer.py
+BuildCommand: 
+SupportedProducts: Pro, Community
