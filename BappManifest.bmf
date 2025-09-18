@@ -3,10 +3,10 @@ ExtensionType: 2
 Name: Type Xplorer
 RepoName: type-xplorer
 ScreenVersion: 1.0.0
-SerialVersion: 2
+SerialVersion: 3
 MinPlatformVersion: 2
 ProOnly: False
-Author: Over-Flowy
+Author: Mohammad Khaleghdadi
 ShortDescription: Test different HTTP Content-Types (e.g., urlencoded, JSON, XML) in requests and view responses in an easy-to-use interface.
 EntryPoint: TypeXplorer.py
 BuildCommand: 
