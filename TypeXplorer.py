@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from burp import IBurpExtender, ITab, IContextMenuFactory, IMessageEditorController, IExtensionStateListener
 from java.io import ByteArrayInputStream, ByteArrayOutputStream
-from java.lang import Object, String, Throwable
+from java.lang import InterruptedException, Object, String, Thread, Throwable
 from java.util import ArrayList
+from java.util.concurrent import Callable, ExecutionException, FutureTask
+from java.util.concurrent.atomic import AtomicBoolean
 from java.util.zip import GZIPInputStream, Inflater, InflaterInputStream
 from javax.swing import (
     JPanel, JSplitPane, JScrollPane,
@@ -12,7 +14,7 @@ from javax.swing.event import ListSelectionListener
 from java.awt import BorderLayout, Color, Font, Dimension, FlowLayout, Insets, GridBagLayout, GridBagConstraints
 from java.awt.event import KeyAdapter, KeyEvent
 from collections import OrderedDict
-from threading import Thread
+from threading import Lock
 from xml.sax.saxutils import escape as xml_escape
 import xml.etree.ElementTree as ET
 import jarray
@@ -475,6 +477,18 @@ class DeleteKeyListener(KeyAdapter):
             self.parent._delete_selected_endpoint()
 
 
+class _HttpCall(Callable):
+    """Wraps makeHttpRequest so it can run on a helper thread behind a FutureTask"""
+
+    def __init__(self, callbacks, http_service, request_bytes):
+        self.callbacks = callbacks
+        self.http_service = http_service
+        self.request_bytes = request_bytes
+
+    def call(self):
+        return self.callbacks.makeHttpRequest(self.http_service, self.request_bytes)
+
+
 class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorController, IExtensionStateListener):
 
     def registerExtenderCallbacks(self, callbacks):
@@ -483,12 +497,15 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.endpoint_message_map = {}   # label -> saved IHttpRequestResponse
         self.selected_cases = {}         # label -> set((content_type, body_format))
         # {label: {(content_type, body_format, xml_wrapped): (request, response, status, error)}}
+        # Shared with the worker thread: only touch it while holding _cache_lock
         self.test_results_cache = {}
+        self._cache_lock = Lock()
         self.endpoint_counter = 0
         self._visible_cases = []         # cases shown in the case list, same order as the list model
         self._shown = None               # (label, case, result) currently loaded in the editors
-        self._running = False
-        self._unloaded = False
+        self._running = AtomicBoolean(False)
+        self._unloaded = AtomicBoolean(False)
+        self._worker = None              # java.lang.Thread running the tests, kept so unload can interrupt it
         self.last_service = None
         self.last_request = None
         self.last_response = None
@@ -499,7 +516,10 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         callbacks.registerExtensionStateListener(self)
 
     def extensionUnloaded(self):
-        self._unloaded = True
+        self._unloaded.set(True)
+        worker = self._worker
+        if worker is not None:
+            worker.interrupt()  # aborts the wait on an in-flight request, see _make_http_request
 
     def createMenuItems(self, invocation):
         # Only show the context menu item if exactly one message with a body is selected
@@ -529,14 +549,32 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         messages = invocation.getSelectedMessages()
         if not messages:
             return
-        # Keep our own copy: the original message object may be changed or released later
-        message = self._callbacks.saveBuffersToTempFiles(messages[0])
-        info = self._helpers.analyzeRequest(message.getHttpService(), message.getRequest())
+        original = messages[0]
+
+        def save_thread():
+            try:
+                # Keep our own copy: the original message object may be changed or released later.
+                # This writes the whole message to disk, so it stays off the UI thread.
+                message = self._callbacks.saveBuffersToTempFiles(original)
+                url = self._helpers.analyzeRequest(message.getHttpService(), message.getRequest()).getUrl().toString()
+            except Exception:
+                self._callbacks.printError("TypeXplorer: %s" % traceback.format_exc())
+                return
+            SwingUtilities.invokeLater(lambda: self._add_endpoint(message, url))
+
+        saver = Thread(save_thread, "TypeXplorer-save")
+        saver.setDaemon(True)
+        saver.start()
+
+    def _add_endpoint(self, message, url):
+        if self._unloaded.get():
+            return
         self.endpoint_counter += 1
-        label = "%d) %s" % (self.endpoint_counter, info.getUrl().toString())
+        label = "%d) %s" % (self.endpoint_counter, url)
         self.endpoint_message_map[label] = message
         self.selected_cases[label] = set()
-        self.test_results_cache[label] = {}
+        with self._cache_lock:
+            self.test_results_cache[label] = {}
         self.endpoint_list_model.addElement(label)
         self.endpoint_list_view.setSelectedIndex(self.endpoint_list_model.getSize() - 1)
 
@@ -759,7 +797,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
     def _update_test_button_state(self):
         """Enable/disable test button based on selected endpoint, test cases and a running job"""
         selection = self._current_selection()
-        self.test_button.setEnabled(not self._running and bool(selection))
+        self.test_button.setEnabled(not self._running.get() and bool(selection))
 
     def _delete_selected_endpoint(self):
         label = self._current_label()
@@ -768,7 +806,8 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
             return
         self.endpoint_message_map.pop(label, None)
         self.selected_cases.pop(label, None)
-        self.test_results_cache.pop(label, None)
+        with self._cache_lock:
+            self.test_results_cache.pop(label, None)
         self.endpoint_list_model.remove(idx)
         self._on_endpoint_selected()
 
@@ -780,7 +819,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         return (case[0], case[1], wrap)
 
     def _lookup_result(self, label, case):
-        return self.test_results_cache.get(label, {}).get(self._cache_key(case))
+        key = self._cache_key(case)
+        with self._cache_lock:
+            return self.test_results_cache.get(label, {}).get(key)
 
     def _update_test_case_list(self):
         """Show the endpoint's selected test cases, prefixed with the response status code"""
@@ -870,44 +911,55 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         label = self._current_label()
         message = self.endpoint_message_map.get(label) if label else None
         selection = self.selected_cases.get(label) if label else None
-        if message is None or not selection or self._running:
+        if message is None or not selection or self._unloaded.get():
             return
+        if not self._running.compareAndSet(False, True):
+            return  # a run is already in progress
 
         # Snapshot UI state here (on the UI thread) so the worker never touches Swing or live sets
         cases = [(h, b) for _, h, b in self.test_case_configs if (h, b) in selection]
         wrap_root = self.xml_root_wrapper_checkbox.isSelected()
 
-        self._running = True
         self.test_button.setEnabled(False)
         self.test_button.setText("Testing...")
 
         def run_tests_thread():
             try:
                 for content_type, body_format in cases:
-                    if self._unloaded:
-                        break
-                    results = self.test_results_cache.get(label)
-                    if results is None:  # endpoint was deleted while running
+                    if self._unloaded.get() or Thread.currentThread().isInterrupted():
                         break
                     key = (content_type, body_format, wrap_root if body_format == "xml" else False)
-                    cached = results.get(key)
+                    with self._cache_lock:
+                        results = self.test_results_cache.get(label)
+                        if results is None:  # endpoint was deleted while running
+                            break
+                        cached = results.get(key)
                     if cached is not None and cached[2] != "ERR":  # failed runs are retried
                         continue
                     try:
                         result = self._execute_test_case(message, content_type, body_format, wrap_root)
+                    except InterruptedException:
+                        break  # extension unloaded mid-request
                     except ParseError as e:
                         result = (None, None, "ERR", "%s" % e)
                     except Exception as e:
                         self._callbacks.printError("TypeXplorer: %s" % traceback.format_exc())
                         result = (None, None, "ERR", "%s: %s" % (e.__class__.__name__, e))
-                    results[key] = result
+                    with self._cache_lock:
+                        results = self.test_results_cache.get(label)
+                        if results is None:  # endpoint was deleted during the request
+                            break
+                        results[key] = result
                     SwingUtilities.invokeLater(self._update_test_case_list)
             finally:
-                self._running = False
-                SwingUtilities.invokeLater(self._finish_run)
+                self._worker = None
+                self._running.set(False)
+                if not self._unloaded.get():
+                    SwingUtilities.invokeLater(self._finish_run)
 
-        worker = Thread(target=run_tests_thread)
+        worker = Thread(run_tests_thread, "TypeXplorer-tests")
         worker.setDaemon(True)
+        self._worker = worker
         worker.start()
 
     def _finish_run(self):
@@ -954,10 +1006,25 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         new_headers.append('Content-Length: %d' % len(new_body))
 
         new_request_bytes = _to_bytes('\r\n'.join(new_headers) + '\r\n\r\n' + new_body)
-        http_response = self._callbacks.makeHttpRequest(http_service, new_request_bytes)
+        http_response = self._make_http_request(http_service, new_request_bytes)
         response_bytes = http_response.getResponse() if http_response is not None else None
         if not response_bytes:
             return new_request_bytes, None, "ERR", "no response received (timeout or connection failure)"
 
         status = self._helpers.analyzeResponse(response_bytes).getStatusCode()
         return new_request_bytes, response_bytes, str(status), None
+
+    def _make_http_request(self, http_service, request_bytes):
+        """makeHttpRequest blocks on socket I/O that Thread.interrupt() can't break, so it runs on a
+        helper thread while the caller waits interruptibly. Raises InterruptedException on unload."""
+        task = FutureTask(_HttpCall(self._callbacks, http_service, request_bytes))
+        sender = Thread(task, "TypeXplorer-http")
+        sender.setDaemon(True)
+        sender.start()
+        try:
+            return task.get()
+        except InterruptedException:
+            task.cancel(True)
+            raise
+        except ExecutionException as e:
+            raise e.getCause()
