@@ -25,24 +25,37 @@ This is a Burp Suite extension designed to test different content types in HTTP 
    5. Click "Next" and then "Close" to load the extension.
 
 ## Usage
-
-**Sending Requests**:
-   - Right-click on a request in Burp Suite (e.g., in the Proxy or Repeater tab).
-   - Select "Send to TypeXplorer" from the context menu.
-   - The request will be added to the extension's endpoint list.
-
 **Deleting Entries**:
    - Select an endpoint in the list.
    - Press the delete key to remove it from the list.
+   
+**Sending Requests**:
+   - Right-click on a request in Burp Suite (e.g., in the Proxy or Repeater tab).
+   - Select "Send to TypeXplorer" from the context menu.
 
-![image 1](assets/1.png)
-![image 2](assets/2.png)
+   ![image 1](assets/1.png)
+
+   - The request will be added to the extension's endpoint list.
+   - Now you have to check what test you want to do and click on `test selected`.
+   
+   ![image 2](assets/2.png)
+
+   - After test done you can see this label and can check the result 
+
+   ![image 2](assets/4.png)
+
+
+## Examples
+You can see list of some write-ups and research related to this topic :
+
+   - [Why text/plain is evil for WAF](https://blog.sicuranext.com/why-text-plain-is-evil-for-web-application-firewall-and-input-validation/)
+   - [CSRF by change header](https://medium.com/@spettyial/oops-this-target-has-csrf-protection-b48db18b99aa)
+   - [CSRF](https://medium.com/@osamaavvan/json-csrf-to-formdata-attack-eb65272376a2)
+   - [CSRF](https://medium.com/@spettyial/oops-this-target-has-csrf-protection-b48db18b99aa)
+   - [Exploiting json based csrf](https://sallam.gitbook.io/sec-88/write-ups/exploiting-json-based-csrf-the-hidden-threat-in-profile-management)
 
 
 
-
-
-https://github.com/user-attachments/assets/32230033-1e3a-416b-8ec0-99fb41c9e565
 
 
 
