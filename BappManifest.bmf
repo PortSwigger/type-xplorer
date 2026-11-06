@@ -2,8 +2,8 @@ Uuid: b12907f6b1a848c98accc35a5bdfda76
 ExtensionType: 2
 Name: Type Xplorer
 RepoName: type-xplorer
-ScreenVersion: 1.0.0
-SerialVersion: 3
+ScreenVersion: 1.1.0
+SerialVersion: 4
 MinPlatformVersion: 2
 ProOnly: False
 Author: Mohammad Khaleghdadi
