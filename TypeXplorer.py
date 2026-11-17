@@ -248,13 +248,17 @@ def _hide_prefixes(body):
 
 def _xml_value(element):
     """Leaf without attributes -> text; otherwise a dict with "@attr" and "#text" entries."""
-    text = _utf8((element.text or '').strip())
+    text_parts = [(element.text or '').strip()]
     attributes = [('@' + _utf8(k), _utf8(v)) for k, v in element.attrib.items()]
     if len(element) == 0 and not attributes:
-        return text
+        return _utf8(text_parts[0])
     nested = OrderedDict(attributes)
     for child in element:
-        _add(nested, _utf8(child.tag), _xml_value(child))
+        _add(nested, _utf8(child.tag).replace(_NS_MARK, ':'), _xml_value(child))
+        tail = (child.tail or '').strip()
+        if tail:
+            text_parts.append(tail)
+    text = _utf8(' '.join(p for p in text_parts if p))
     if text:
         nested['#text'] = text
     return nested
@@ -274,9 +278,9 @@ def parse_xml(body):
     children = list(wrapper)
     # A single element that itself has children is the document's own root
     node = children[0] if len(children) == 1 and len(children[0]) > 0 else wrapper
-    params = OrderedDict()
+    params = OrderedDict(('@' + _utf8(k), _utf8(v)) for k, v in node.attrib.items())
     for child in node:
-        _add(params, _utf8(child.tag), _xml_value(child))
+        _add(params, _utf8(child.tag).replace(_NS_MARK, ':'), _xml_value(child))
     return params
 
 
@@ -377,7 +381,7 @@ def to_json(params):
 
 def _xml_name(name):
     parts = []
-    for part in _utf8(name).split(_NS_MARK):  # prefix and local name are checked separately
+    for part in _utf8(name).split(':'):  # prefix and local name are checked separately
         part = re.sub(r'[^A-Za-z0-9_.\-]', '_', part)
         if not part or not (part[0].isalpha() or part[0] == '_'):
             part = '_' + part
@@ -924,6 +928,9 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
         self.test_button.setText("Testing...")
 
         def run_tests_thread():
+            # Jython's expat shim loads Xerces via the thread's context class loader; worker
+            # threads don't inherit the extension's loader, so ET.fromstring can't find it.
+            Thread.currentThread().setContextClassLoader(self.getClass().getClassLoader())
             try:
                 for content_type, body_format in cases:
                     if self._unloaded.get() or Thread.currentThread().isInterrupted():
@@ -942,7 +949,7 @@ class BurpExtender(IBurpExtender, ITab, IContextMenuFactory, IMessageEditorContr
                         break  # extension unloaded mid-request
                     except ParseError as e:
                         result = (None, None, "ERR", "%s" % e)
-                    except Exception as e:
+                    except (Exception, Throwable) as e:
                         self._callbacks.printError("TypeXplorer: %s" % traceback.format_exc())
                         result = (None, None, "ERR", "%s: %s" % (e.__class__.__name__, e))
                     with self._cache_lock:
