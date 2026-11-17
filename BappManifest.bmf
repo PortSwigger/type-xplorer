@@ -3,7 +3,7 @@ ExtensionType: 2
 Name: Type Xplorer
 RepoName: type-xplorer
 ScreenVersion: 1.1.0
-SerialVersion: 4
+SerialVersion: 5
 MinPlatformVersion: 2
 ProOnly: False
 Author: Mohammad Khaleghdadi
